@@ -79,12 +79,16 @@ class SILoss:
 
         # projection loss
         proj_loss = 0.
-        bsz = zs[0].shape[0]
-        for i, (z, z_tilde) in enumerate(zip(zs, zs_tilde)):
-            for j, (z_j, z_tilde_j) in enumerate(zip(z, z_tilde)):
-                z_tilde_j = torch.nn.functional.normalize(z_tilde_j, dim=-1) 
-                z_j = torch.nn.functional.normalize(z_j, dim=-1) 
-                proj_loss += mean_flat(-(z_j * z_tilde_j).sum(dim=-1))
-        proj_loss /= (len(zs) * bsz)
+        if zs and len(zs) > 0:  # 只有当zs不为空时才计算投影损失
+            bsz = zs[0].shape[0]
+            for i, (z, z_tilde) in enumerate(zip(zs, zs_tilde)):
+                for j, (z_j, z_tilde_j) in enumerate(zip(z, z_tilde)):
+                    z_tilde_j = torch.nn.functional.normalize(z_tilde_j, dim=-1) 
+                    z_j = torch.nn.functional.normalize(z_j, dim=-1) 
+                    proj_loss += mean_flat(-(z_j * z_tilde_j).sum(dim=-1))
+            proj_loss /= (len(zs) * bsz)
+        else:
+            # 当没有encoder时，投影损失为0
+            proj_loss = torch.tensor(0.0, device=model_output.device)
 
         return denoising_loss, proj_loss

@@ -10,7 +10,9 @@ import torch
 import torch.nn as nn
 import numpy as np
 import math
-from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
+from timm.layers.patch_embed import PatchEmbed
+from timm.layers.attention import Attention
+from timm.layers.mlp import Mlp
 
 
 def build_mlp(hidden_size, projector_dim, z_dim):
@@ -204,8 +206,12 @@ class SiT(nn.Module):
             SiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio, **block_kwargs) for _ in range(depth)
         ])
         self.projectors = nn.ModuleList([
-            build_mlp(hidden_size, projector_dim, z_dim) for z_dim in z_dims
+            build_mlp(hidden_size, projector_dim, z_dim) for z_dim in z_dims if z_dim > 0
             ])
+        # FiLM 调制层：根据 t_embed 生成 shift 与 scale，用于调制 projector 输出
+        self.film_generators = nn.ModuleList([
+            nn.Linear(hidden_size, 2 * z_dim, bias=True) for z_dim in z_dims if z_dim > 0
+        ])
         self.final_layer = FinalLayer(decoder_hidden_size, patch_size, self.out_channels)
         self.initialize_weights()
 
@@ -235,6 +241,13 @@ class SiT(nn.Module):
         # Initialize timestep embedding MLP:
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
         nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
+
+        # Initialize FiLM generators:
+        for fg in self.film_generators:
+            w_fg = fg.weight.data  # type: ignore[arg-type]
+            torch.nn.init.xavier_uniform_(w_fg)  # type: ignore[arg-type]
+            if fg.bias is not None:
+                nn.init.constant_(fg.bias.data, 0)  # type: ignore[arg-type]
 
         # Zero-out adaLN modulation layers in SiT blocks:
         for block in self.blocks:
@@ -280,7 +293,18 @@ class SiT(nn.Module):
         for i, block in enumerate(self.blocks):
             x = block(x, c)                      # (N, T, D)
             if (i + 1) == self.encoder_depth:
-                zs = [projector(x.reshape(-1, D)).reshape(N, T, -1) for projector in self.projectors]
+                if self.projectors:
+                    zs = []
+                    for idx, projector in enumerate(self.projectors):
+                        # projector 输出 (N, T, z_dim)
+                        z = projector(x.reshape(-1, D)).reshape(N, T, -1)
+                        # 由 t_embed 生成 FiLM 参数
+                        shift, scale = self.film_generators[idx](t_embed).chunk(2, dim=-1)
+                        # 调制：z -> (1+scale)*z + shift
+                        z = modulate(z, shift.unsqueeze(1), scale.unsqueeze(1))
+                        zs.append(z)
+                else:
+                    zs = []
         x = self.final_layer(x, c)                # (N, T, patch_size ** 2 * out_channels)
         x = self.unpatchify(x)                   # (N, out_channels, H, W)
 
@@ -389,4 +413,3 @@ SiT_models = {
     'SiT-B/2':  SiT_B_2,   'SiT-B/4':  SiT_B_4,   'SiT-B/8':  SiT_B_8,
     'SiT-S/2':  SiT_S_2,   'SiT-S/4':  SiT_S_4,   'SiT-S/8':  SiT_S_8,
 }
-

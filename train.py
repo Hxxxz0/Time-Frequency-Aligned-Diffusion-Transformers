@@ -13,6 +13,11 @@ import torch.nn.functional as F
 import torch.utils.checkpoint
 from tqdm.auto import tqdm
 from torch.utils.data import DataLoader
+try:
+    from torch_dct import dct_2d
+except ImportError:
+    print("Warning: torch_dct not found. Please install with: pip install torch_dct")
+    dct_2d = None
 
 from accelerate import Accelerator
 from accelerate.logging import get_logger
@@ -36,9 +41,61 @@ logger = get_logger(__name__)
 CLIP_DEFAULT_MEAN = (0.48145466, 0.4578275, 0.40821073)
 CLIP_DEFAULT_STD = (0.26862954, 0.26130258, 0.27577711)
 
+def extract_dct_features(x, keep_low_freq=8, patch_size=16):
+    """
+    提取图像的DCT低频特征
+    Args:
+        x: 输入图像 (B, C, H, W)
+        keep_low_freq: 保留的低频分量数量 (默认8x8)
+        patch_size: 分块大小进行DCT变换 (默认16x16)
+    Returns:
+        DCT低频特征 (B, num_patches, keep_low_freq*keep_low_freq*C)
+    """
+    if dct_2d is None:
+        raise ImportError("torch_dct is required for DCT features. Install with: pip install torch_dct")
+    
+    B, C, H, W = x.shape
+    device = x.device
+    
+    # 确保图像尺寸能被patch_size整除
+    assert H % patch_size == 0 and W % patch_size == 0, f"Image size ({H}, {W}) must be divisible by patch_size ({patch_size})"
+    
+    # 分块处理
+    num_patches_h = H // patch_size
+    num_patches_w = W // patch_size
+    
+    # 重塑为patches: (B, C, num_patches_h, patch_size, num_patches_w, patch_size)
+    x_patches = x.view(B, C, num_patches_h, patch_size, num_patches_w, patch_size)
+    # 重排为: (B, C, num_patches_h, num_patches_w, patch_size, patch_size)
+    x_patches = x_patches.permute(0, 1, 2, 4, 3, 5).contiguous()
+    # 展平patches维度: (B*C*num_patches_h*num_patches_w, patch_size, patch_size)
+    x_patches = x_patches.view(-1, patch_size, patch_size)
+    
+    # 对每个patch进行DCT变换
+    dct_patches = dct_2d(x_patches, norm='ortho')
+    
+    # 保留低频分量 (左上角 keep_low_freq x keep_low_freq 区域)
+    low_freq_patches = dct_patches[:, :keep_low_freq, :keep_low_freq]
+    
+    # 重塑回原始维度
+    # (B*C*num_patches_h*num_patches_w, keep_low_freq, keep_low_freq) -> 
+    # (B, C, num_patches_h, num_patches_w, keep_low_freq, keep_low_freq)
+    low_freq_patches = low_freq_patches.view(B, C, num_patches_h, num_patches_w, keep_low_freq, keep_low_freq)
+    
+    # 展平为每个patch的特征: (B, num_patches_h*num_patches_w, C*keep_low_freq*keep_low_freq)
+    total_patches = num_patches_h * num_patches_w
+    features = low_freq_patches.permute(0, 2, 3, 1, 4, 5).contiguous()
+    features = features.view(B, total_patches, C * keep_low_freq * keep_low_freq)
+    
+    return features
+
 def preprocess_raw_image(x, enc_type):
     resolution = x.shape[-1]
-    if 'clip' in enc_type:
+    if enc_type is None:
+        # 当不使用encoder时，进行基本的归一化处理
+        x = x / 255.
+        x = Normalize(IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD)(x)
+    elif 'clip' in enc_type:
         x = x / 255.
         x = torch.nn.functional.interpolate(x, 224 * (resolution // 256), mode='bicubic')
         x = Normalize(CLIP_DEFAULT_MEAN, CLIP_DEFAULT_STD)(x)
@@ -154,13 +211,20 @@ def main(args):
     assert args.resolution % 8 == 0, "Image size must be divisible by 8 (for the VAE encoder)."
     latent_size = args.resolution // 8
 
-    if args.enc_type != None:
-        encoders, encoder_types, architectures = load_encoders(
-            args.enc_type, device, args.resolution
-            )
+    if args.enc_type != None and args.enc_type != 'None':
+        if args.enc_type == 'DCT':
+            # DCT特征提取不需要加载预训练模型，使用特殊标记
+            encoders, encoder_types, architectures = [], ['DCT'], []
+            # DCT特征维度: 3通道 * 8*8低频 = 192维
+            z_dims = [3 * 8 * 8]  # 默认保留8x8低频分量
+        else:
+            encoders, encoder_types, architectures = load_encoders(
+                args.enc_type, device, args.resolution
+                )
+            z_dims = [encoder.embed_dim for encoder in encoders]
     else:
-        raise NotImplementedError()
-    z_dims = [encoder.embed_dim for encoder in encoders] if args.enc_type != 'None' else [0]
+        encoders, encoder_types, architectures = [], [], []
+        z_dims = [0]
     block_kwargs = {"fused_attn": args.fused_attn, "qk_norm": args.qk_norm}
     model = SiT_models[args.model](
         input_size=latent_size,
@@ -296,12 +360,18 @@ def main(args):
                 x = sample_posterior(x, latents_scale=latents_scale, latents_bias=latents_bias)
                 zs = []
                 with accelerator.autocast():
-                    for encoder, encoder_type, arch in zip(encoders, encoder_types, architectures):
-                        raw_image_ = preprocess_raw_image(raw_image, encoder_type)
-                        z = encoder.forward_features(raw_image_)
-                        if 'mocov3' in encoder_type: z = z = z[:, 1:] 
-                        if 'dinov2' in encoder_type: z = z['x_norm_patchtokens']
+                    if args.enc_type == 'DCT':
+                        # DCT特征提取
+                        raw_image_normalized = raw_image / 255.0  # 归一化到[0,1]
+                        z = extract_dct_features(raw_image_normalized, keep_low_freq=8, patch_size=16)
                         zs.append(z)
+                    elif encoders:  # 使用预训练encoder
+                        for encoder, encoder_type, arch in zip(encoders, encoder_types, architectures):
+                            raw_image_ = preprocess_raw_image(raw_image, encoder_type)
+                            z = encoder.forward_features(raw_image_)
+                            if 'mocov3' in encoder_type: z = z[:, 1:] 
+                            if 'dinov2' in encoder_type: z = z['x_norm_patchtokens']
+                            zs.append(z)
 
             with accelerator.accumulate(model):
                 model_kwargs = dict(y=labels)
@@ -328,7 +398,7 @@ def main(args):
             if global_step % args.checkpointing_steps == 0 and global_step > 0:
                 if accelerator.is_main_process:
                     checkpoint = {
-                        "model": model.module.state_dict(),
+                        "model": model.module.state_dict() if hasattr(model, 'module') else model.state_dict(),
                         "ema": ema.state_dict(),
                         "opt": optimizer.state_dict(),
                         "args": args,

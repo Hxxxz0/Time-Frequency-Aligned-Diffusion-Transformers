@@ -392,7 +392,7 @@ def encode(
     if dest == '':
         raise click.ClickException('--dest output filename or directory must not be an empty string')
 
-    vae = StabilityVAEEncoder(vae_name=model_url, batch_size=1)
+    vae = StabilityVAEEncoder(vae_name=model_url, batch_size=16)
     num_files, input_iter = open_dataset(source, max_images=max_images)
     archive_root_dir, save_bytes, close_dest = open_dest(dest)
     labels = []

@@ -146,6 +146,185 @@ It's possible that this code may not accurately replicate the results outlined i
 This code is mainly built upon [DiT](https://github.com/facebookresearch/DiT), [SiT](https://github.com/willisma/SiT), [edm2](https://github.com/NVlabs/edm2), and [RCG](https://github.com/LTH14/rcg) repositories.\
 We also appreciate [Kyungmin Lee](https://kyungmnlee.github.io/) for providing the initial version of the implementation.
 
+## FFHQ 256x256 数据集处理与训练指南
+
+### 数据集预处理
+
+如果你有FFHQ 256x256的PNG图像数据集，按照以下步骤进行预处理：
+
+#### 1. 准备数据集目录结构
+```bash
+# 假设你的原始图像在 images256x256/ 目录下
+# 创建预处理数据集目录
+mkdir -p full_dataset/images
+mkdir -p full_dataset/vae-sd
+
+# 复制所有图像到预处理目录
+rsync -av images256x256/ full_dataset/images/
+```
+
+#### 2. 生成标签文件
+创建标签文件脚本：
+```python
+# create_full_dataset_json.py
+import json
+import os
+import glob
+
+# 获取所有图像文件
+image_dir = "full_dataset/images"
+image_files = sorted(glob.glob(os.path.join(image_dir, "*.png")))
+
+# 创建标签字典
+labels = []
+for idx, img_path in enumerate(image_files):
+    filename = os.path.basename(img_path)
+    # 为每个图像分配标签（0-999之间循环）
+    label = idx % 1000
+    labels.append([filename, label])
+
+# 保存标签文件
+dataset_dict = {"labels": labels}
+output_path = "full_dataset/images/dataset.json"
+with open(output_path, 'w') as f:
+    json.dump(dataset_dict, f, indent=2)
+
+print(f"Created dataset.json with {len(labels)} entries")
+```
+
+运行脚本生成标签：
+```bash
+python create_full_dataset_json.py
+```
+
+#### 3. VAE特征编码
+使用Stable Diffusion VAE对图像进行编码：
+```bash
+cd preprocessing
+python dataset_tools.py encode --source=../full_dataset/images --dest=../full_dataset/vae-sd
+```
+
+**注意事项：**
+- 首次运行会自动下载VAE模型（约3.5GB）
+- 70000张图像的编码大约需要30-40分钟（RTX 4090）
+- 编码使用批量大小16，可以根据GPU显存调整
+
+### 训练配置
+
+#### 1. 小规模测试训练（100张图像）
+首先进行小规模测试以验证配置：
+```bash
+# 创建测试数据集（100张图像）
+mkdir -p preprocessed_data/images preprocessed_data/vae-sd
+find images256x256 -name "*.png" | head -100 | xargs -I {} cp {} preprocessed_data/images/
+
+# 生成测试标签文件并进行VAE编码
+# （参考上述步骤）
+
+# 启动测试训练
+accelerate launch --num_processes=1 train.py \
+  --report-to="tensorboard" \
+  --allow-tf32 \
+  --mixed-precision="fp16" \
+  --seed=0 \
+  --path-type="linear" \
+  --prediction="v" \
+  --weighting="uniform" \
+  --model="SiT-B/2" \
+  --enc-type="DCT" \
+  --proj-coeff=0.5 \
+  --encoder-depth=8 \
+  --output-dir="exps" \
+  --exp-name="dct-film-test-100imgs" \
+  --data-dir="preprocessed_data" \
+  --batch-size=8 \
+  --epochs=10 \
+  --max-train-steps=100 \
+  --checkpointing-steps=50
+```
+
+#### 2. 完整数据集训练
+VAE编码完成后，使用以下脚本进行完整训练：
+
+创建训练脚本 `train_full.sh`：
+```bash
+#!/bin/bash
+
+# 完整FFHQ训练脚本
+accelerate launch --num_processes=8 train.py \
+  --report-to="tensorboard" \
+  --allow-tf32 \
+  --mixed-precision="fp16" \
+  --seed=0 \
+  --path-type="linear" \
+  --prediction="v" \
+  --weighting="uniform" \
+  --model="SiT-XL/2" \
+  --enc-type="DCT" \
+  --proj-coeff=0.5 \
+  --encoder-depth=8 \
+  --output-dir="exps" \
+  --exp-name="dct-film-ffhq-70k" \
+  --data-dir="full_dataset" \
+  --batch-size=256 \
+  --epochs=100 \
+  --max-train-steps=400000 \
+  --checkpointing-steps=10000 \
+  --num-workers=8
+```
+
+启动训练：
+```bash
+chmod +x train_full.sh
+./train_full.sh
+```
+
+### 训练监控
+
+#### 查看训练进度
+```bash
+# 实时查看训练日志
+tail -f exps/dct-film-ffhq-70k/log.txt
+
+# 启动TensorBoard监控
+tensorboard --logdir=exps/dct-film-ffhq-70k
+```
+
+#### 训练参数说明
+- `--model="SiT-XL/2"`: 使用最大的SiT模型获得最佳效果
+- `--enc-type="DCT"`: 使用DCT频域特征作为辅助监督
+- `--proj-coeff=0.5`: 辅助损失权重
+- `--encoder-depth=8`: 在第8层注入辅助监督
+- `--batch-size=256`: 8卡训练的总批量大小（每卡32）
+- `--max-train-steps=400000`: 总训练步数
+- `--checkpointing-steps=10000`: 每10000步保存一次检查点
+
+#### 单GPU训练配置
+如果只有单个GPU，调整以下参数：
+```bash
+accelerate launch --num_processes=1 train.py \
+  # ... 其他参数保持不变 ...
+  --batch-size=32 \  # 减小批量大小
+  --model="SiT-L/2"  # 可选择较小模型以节省显存
+```
+
+### 性能优化建议
+
+1. **显存优化**：
+   - 使用`--mixed-precision="fp16"`减少显存占用
+   - 根据GPU显存调整批量大小
+   - 较小GPU可选择SiT-B/2或SiT-L/2模型
+
+2. **训练速度**：
+   - 多GPU训练显著提升速度
+   - 使用`--allow-tf32`在支持的GPU上加速
+   - 增加`--num-workers`提升数据加载速度
+
+3. **质量优化**：
+   - DCT + FiLM组合提供最佳生成质量
+   - 适当调整`--proj-coeff`平衡主损失和辅助损失
+   - 使用线性路径类型(`--path-type="linear"`)
+
 ## Recent Updates
 
 ### DCT Feature Support
