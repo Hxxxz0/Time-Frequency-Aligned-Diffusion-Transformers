@@ -146,6 +146,72 @@ It's possible that this code may not accurately replicate the results outlined i
 This code is mainly built upon [DiT](https://github.com/facebookresearch/DiT), [SiT](https://github.com/willisma/SiT), [edm2](https://github.com/NVlabs/edm2), and [RCG](https://github.com/LTH14/rcg) repositories.\
 We also appreciate [Kyungmin Lee](https://kyungmnlee.github.io/) for providing the initial version of the implementation.
 
+## Recent Updates
+
+### DCT Feature Support
+
+We have added support for DCT (Discrete Cosine Transform) features as an auxiliary supervision signal. This enhancement allows the model to learn better global structure representations by predicting DCT frequency domain features from intermediate layers.
+
+**Key Features:**
+- DCT frequency domain feature extraction as auxiliary supervision
+- Configurable low-frequency component preservation (default: 8×8)
+- Improved global coherence in generated images
+
+**Usage:**
+```bash
+accelerate launch train.py \
+  --enc-type="DCT" \
+  --proj-coeff=0.5 \
+  --encoder-depth=8 \
+  [other arguments...]
+```
+
+When `--enc-type="DCT"` is specified:
+- The model will extract DCT features from input images automatically
+- Feature dimension is set to 192 (3 channels × 8×8 low-frequency components)
+- An auxiliary loss will be computed between predicted and ground-truth DCT features
+
+### FiLM (Feature-wise Linear Modulation) Enhancement
+
+We have integrated FiLM conditioning into the projector branches, allowing timestep embeddings to modulate auxiliary feature predictions. This provides better time-aware feature learning in diffusion models.
+
+**Key Features:**
+- Timestep-conditioned feature modulation via FiLM
+- Dynamic auxiliary feature prediction based on noise levels
+- Improved alignment between diffusion timesteps and auxiliary tasks
+
+**Technical Details:**
+- Each projector output is modulated by timestep embedding `t_embed`
+- FiLM generators produce shift and scale parameters: `z_modulated = (1 + scale) * z + shift`
+- Maintains consistency with the main SiT architecture's conditioning philosophy
+
+**Usage:**
+The FiLM enhancement is automatically applied when using auxiliary supervision (any `enc-type` except baseline). No additional configuration is required - the feature modulation will be applied to all projector outputs based on the current diffusion timestep.
+
+**Combined DCT + FiLM Example:**
+```bash
+accelerate launch train.py \
+  --report-to="wandb" \
+  --allow-tf32 \
+  --mixed-precision="fp16" \
+  --seed=0 \
+  --path-type="linear" \
+  --prediction="v" \
+  --weighting="uniform" \
+  --model="SiT-XL/2" \
+  --enc-type="DCT" \
+  --proj-coeff=0.5 \
+  --encoder-depth=8 \
+  --output-dir="exps" \
+  --exp-name="dct-film-enhanced" \
+  --data-dir=[YOUR_DATA_PATH]
+```
+
+This configuration will:
+1. Use DCT features as auxiliary supervision targets
+2. Apply FiLM modulation to projector outputs based on diffusion timesteps
+3. Provide enhanced global structure learning and time-aware feature prediction
+
 ## BibTeX
 
 ```bibtex
@@ -156,3 +222,4 @@ We also appreciate [Kyungmin Lee](https://kyungmnlee.github.io/) for providing t
   booktitle={International Conference on Learning Representations},
 }
 ```
+# Time-Frequency-Aligned-Diffusion-Transformers
