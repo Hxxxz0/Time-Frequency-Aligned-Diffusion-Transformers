@@ -211,7 +211,7 @@ class SiT(nn.Module):
         # FiLM 调制层：根据 t_embed 生成 shift 与 scale，用于调制 projector 输出
         self.film_generators = nn.ModuleList([
             nn.Linear(hidden_size, 2 * z_dim, bias=True) for z_dim in z_dims if z_dim > 0
-        ])
+            ])
         self.final_layer = FinalLayer(decoder_hidden_size, patch_size, self.out_channels)
         self.initialize_weights()
 

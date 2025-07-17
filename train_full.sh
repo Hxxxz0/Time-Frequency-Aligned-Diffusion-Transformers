@@ -1,10 +1,9 @@
 #!/bin/bash
 
-# 设置只使用前4个GPU
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+# 使用8个GPU进行训练（如果可用）
+# 如果只有单GPU，将num_processes改为1
 
-# 使用4个GPU进行训练
-accelerate launch --num_processes=4 train.py \
+accelerate launch --num_processes=8 train.py \
   --report-to="tensorboard" \
   --allow-tf32 \
   --mixed-precision="fp16" \
@@ -17,7 +16,7 @@ accelerate launch --num_processes=4 train.py \
   --proj-coeff=0.5 \
   --encoder-depth=8 \
   --output-dir="exps" \
-  --exp-name="dct-film-full-70k-4gpu" \
+  --exp-name="dct-film-full-70k" \
   --data-dir="full_dataset" \
   --batch-size=256 \
   --epochs=100 \

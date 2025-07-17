@@ -24,6 +24,7 @@ class SILoss:
             accelerator=None, 
             latents_scale=None, 
             latents_bias=None,
+            proj_type="cosine",
             ):
         self.prediction = prediction
         self.weighting = weighting
@@ -32,6 +33,7 @@ class SILoss:
         self.accelerator = accelerator
         self.latents_scale = latents_scale
         self.latents_bias = latents_bias
+        self.proj_type = proj_type
 
     def interpolant(self, t):
         if self.path_type == "linear":
@@ -83,9 +85,14 @@ class SILoss:
             bsz = zs[0].shape[0]
             for i, (z, z_tilde) in enumerate(zip(zs, zs_tilde)):
                 for j, (z_j, z_tilde_j) in enumerate(zip(z, z_tilde)):
-                    z_tilde_j = torch.nn.functional.normalize(z_tilde_j, dim=-1) 
-                    z_j = torch.nn.functional.normalize(z_j, dim=-1) 
-                    proj_loss += mean_flat(-(z_j * z_tilde_j).sum(dim=-1))
+                    if self.proj_type == "cosine":
+                        z_tilde_j = torch.nn.functional.normalize(z_tilde_j, dim=-1) 
+                        z_j = torch.nn.functional.normalize(z_j, dim=-1) 
+                        proj_loss += mean_flat(-(z_j * z_tilde_j).sum(dim=-1))
+                    elif self.proj_type == "l2":
+                        proj_loss += mean_flat((z_j - z_tilde_j) ** 2)
+                    else:
+                        raise ValueError(f"Unknown proj_type: {self.proj_type}")
             proj_loss /= (len(zs) * bsz)
         else:
             # 当没有encoder时，投影损失为0
