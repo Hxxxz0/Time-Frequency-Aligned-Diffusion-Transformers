@@ -89,6 +89,81 @@ def extract_dct_features(x, keep_low_freq=8, patch_size=16):
     
     return features
 
+# === New: multi-band DCT feature extraction ============================
+
+def extract_dct_multiband(x, patch_size: int = 16, bands: tuple = (8, 12, 16)):
+    """Return low-/mid-/high-frequency DCT features.
+
+    Args:
+        x: Input image tensor of shape (B, C, H, W) in [0,1] range.
+        patch_size: Spatial size of each square patch on which to apply the 2-D DCT.
+        bands: Tuple specifying the three cumulative band edges. Default (8, 12, 16).
+
+    Returns:
+        features: list with three tensors [z_lf, z_mf, z_hf]
+                   each of shape (B, num_patches, C * band_dim), where
+                   band_dim = (#coefficients in that band).
+    """
+    if dct_2d is None:
+        raise ImportError("torch_dct is required for DCT features. Install with: pip install torch_dct")
+
+    assert len(bands) == 3 and bands[0] < bands[1] < bands[2] == patch_size, \
+    "bands should be a tuple like (8,12,16) with final value == patch_size"
+
+    B, C, H, W = x.shape
+    device = x.device
+    assert H % patch_size == 0 and W % patch_size == 0, "Image size must be divisible by patch_size"
+
+    num_patches_h = H // patch_size
+    num_patches_w = W // patch_size
+
+    # reshape into patches
+    x_patches = x.view(B, C, num_patches_h, patch_size, num_patches_w, patch_size)
+    x_patches = x_patches.permute(0, 1, 2, 4, 3, 5).contiguous()
+    x_patches = x_patches.view(-1, patch_size, patch_size)  # (B*C*num_patches, P, P)
+
+    dct_patches = dct_2d(x_patches, norm='ortho')
+
+    # Prepare boolean masks for three bands (shared across batch)
+    P = patch_size
+    grid_y, grid_x = torch.meshgrid(torch.arange(P, device=device), torch.arange(P, device=device), indexing='ij')
+
+    r1, r2, r3 = bands  # 8,12,16
+    mask_lf = (grid_y < r1) & (grid_x < r1)
+    mask_mf = (grid_y < r2) & (grid_x < r2) & (~mask_lf)
+    mask_hf = (~((grid_y < r2) & (grid_x < r2)))  # complement of <=12x12
+
+    # flatten masks to apply as boolean index
+    mask_lf_flat = mask_lf.flatten()
+    mask_mf_flat = mask_mf.flatten()
+    mask_hf_flat = mask_hf.flatten()
+
+    # Flatten DCT patches to (N_patches, P*P)
+    dct_flat = dct_patches.reshape(dct_patches.shape[0], -1)
+
+    # Select coefficients
+    lf_flat = dct_flat[:, mask_lf_flat]
+    mf_flat = dct_flat[:, mask_mf_flat]
+    hf_flat = dct_flat[:, mask_hf_flat]
+
+    # Coefficient counts per band
+    dim_lf = mask_lf_flat.sum().item()
+    dim_mf = mask_mf_flat.sum().item()
+    dim_hf = mask_hf_flat.sum().item()
+
+    # reshape back: (B, C, nH, nW, dim)
+    total_patches = num_patches_h * num_patches_w
+    lf = lf_flat.view(B, C, num_patches_h, num_patches_w, dim_lf)
+    mf = mf_flat.view(B, C, num_patches_h, num_patches_w, dim_mf)
+    hf = hf_flat.view(B, C, num_patches_h, num_patches_w, dim_hf)
+
+    # permute to (B, nH, nW, C, dim) and flatten spatial dims
+    lf = lf.permute(0, 2, 3, 1, 4).contiguous().view(B, total_patches, C * dim_lf)
+    mf = mf.permute(0, 2, 3, 1, 4).contiguous().view(B, total_patches, C * dim_mf)
+    hf = hf.permute(0, 2, 3, 1, 4).contiguous().view(B, total_patches, C * dim_hf)
+
+    return [lf, mf, hf]
+
 def preprocess_raw_image(x, enc_type):
     resolution = x.shape[-1]
     if enc_type is None:
@@ -212,11 +287,14 @@ def main(args):
     latent_size = args.resolution // 8
 
     if args.enc_type != None and args.enc_type != 'None':
-        if args.enc_type == 'DCT':
-            # DCT特征提取不需要加载预训练模型，使用特殊标记
-            encoders, encoder_types, architectures = [], ['DCT'], []
-            # DCT特征维度: 3通道 * 8*8低频 = 192维
-            z_dims = [3 * 8 * 8]  # 默认保留8x8低频分量
+        if args.enc_type in ['DCT', 'DCT-MULTI']:
+            # DCT 特征提取不需要加载预训练模型
+            if args.enc_type == 'DCT':
+                encoders, encoder_types, architectures = [], ['DCT'], []
+                z_dims = [3 * 8 * 8]
+            else:  # DCT-MULTI
+                encoders, encoder_types, architectures = [], ['DCT-MULTI'], []
+                z_dims = [3 * 8 * 8, 3 * (12 * 12 - 8 * 8), 3 * (16 * 16 - 12 * 12)]
         else:
             encoders, encoder_types, architectures = load_encoders(
                 args.enc_type, device, args.resolution
@@ -362,10 +440,13 @@ def main(args):
                 zs = []
                 with accelerator.autocast():
                     if args.enc_type == 'DCT':
-                        # DCT特征提取
-                        raw_image_normalized = raw_image / 255.0  # 归一化到[0,1]
+                        raw_image_normalized = raw_image / 255.0
                         z = extract_dct_features(raw_image_normalized, keep_low_freq=8, patch_size=16)
                         zs.append(z)
+                    elif args.enc_type == 'DCT-MULTI':
+                        raw_image_normalized = raw_image / 255.0
+                        z_list = extract_dct_multiband(raw_image_normalized, patch_size=16, bands=(8, 12, 16))
+                        zs.extend(z_list)
                     elif encoders:  # 使用预训练encoder
                         for encoder, encoder_type, arch in zip(encoders, encoder_types, architectures):
                             raw_image_ = preprocess_raw_image(raw_image, encoder_type)

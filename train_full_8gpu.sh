@@ -1,14 +1,14 @@
 #!/bin/bash
 
 # 8GPU训练脚本 - 使用nohup防止意外中断
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export CUDA_VISIBLE_DEVICES=4,5,6,7
 
 # 创建日志目录
 mkdir -p logs
 
 # 启动训练，输出重定向到日志文件
 nohup accelerate launch \
-  --num_processes=8 \
+  --num_processes=4 \
   --main_process_port=29500 \
   train.py \
   --report-to="tensorboard" \
@@ -25,14 +25,14 @@ nohup accelerate launch \
   --output-dir="exps" \
   --exp-name="dct-film-full-70k-8gpu" \
   --data-dir="full_dataset" \
-  --batch-size=256 \
+  --batch-size=128 \
   --epochs=100 \
   --max-train-steps=50000 \
   --checkpointing-steps=5000 \
   --num-workers=16 \
-  --proj-type="l2" \
+  --proj-type="cosine" \
   --gradient-accumulation-steps=1 \
-  > logs/train_8gpu_l2.log 2>&1 &
+  > logs/train_4gpu_l2_multi.log 2>&1 &
 
 echo "训练已在后台启动！"
 echo "查看训练日志: tail -f logs/train_8gpu.log"

@@ -79,23 +79,27 @@ class SILoss:
         model_output, zs_tilde  = model(model_input, time_input.flatten(), **model_kwargs)
         denoising_loss = mean_flat((model_output - model_target) ** 2)
 
-        # projection loss
-        proj_loss = 0.
-        if zs and len(zs) > 0:  # 只有当zs不为空时才计算投影损失
-            bsz = zs[0].shape[0]
-            for i, (z, z_tilde) in enumerate(zip(zs, zs_tilde)):
-                for j, (z_j, z_tilde_j) in enumerate(zip(z, z_tilde)):
+        # projection loss (vectorized & per-sample)
+        if zs and len(zs) > 0:
+            per_encoder_losses = []  # list of tensors with shape (B,)
+            for z, z_tilde in zip(zs, zs_tilde):
                     if self.proj_type == "cosine":
-                        z_tilde_j = torch.nn.functional.normalize(z_tilde_j, dim=-1) 
-                        z_j = torch.nn.functional.normalize(z_j, dim=-1) 
-                        proj_loss += mean_flat(-(z_j * z_tilde_j).sum(dim=-1))
+                    # negative cosine similarity (keeps consistent with original design)
+                    z = F.normalize(z, dim=-1)
+                    z_tilde = F.normalize(z_tilde, dim=-1)
+                    loss_tok = -(z * z_tilde).sum(dim=-1)  # (B, T)
                     elif self.proj_type == "l2":
-                        proj_loss += mean_flat((z_j - z_tilde_j) ** 2)
+                    # mean squared error per token (consistent with previous implementation)
+                    loss_tok = (z - z_tilde).pow(2).mean(dim=-1)  # (B, T)
                     else:
                         raise ValueError(f"Unknown proj_type: {self.proj_type}")
-            proj_loss /= (len(zs) * bsz)
+
+                per_encoder_losses.append(loss_tok.mean(dim=-1))  # (B,)
+
+            # average across encoders -> (B,)
+            proj_loss = torch.stack(per_encoder_losses, dim=0).mean(dim=0)
         else:
-            # 当没有encoder时，投影损失为0
-            proj_loss = torch.tensor(0.0, device=model_output.device)
+            # no encoder features: projection loss is zero tensor matching batch shape
+            proj_loss = torch.zeros_like(denoising_loss)
 
         return denoising_loss, proj_loss
