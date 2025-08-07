@@ -86,7 +86,7 @@ def extract_dct_features(x, keep_low_freq=8, patch_size=16):
     total_patches = num_patches_h * num_patches_w
     features = low_freq_patches.permute(0, 2, 3, 1, 4, 5).contiguous()
     features = features.view(B, total_patches, C * keep_low_freq * keep_low_freq)
-    
+    features = (features - features.mean(dim=-1, keepdim=True)) / (features.std(dim=-1, keepdim=True) + 1e-6)
     return features
 
 # === New: multi-band DCT feature extraction ============================
@@ -161,6 +161,9 @@ def extract_dct_multiband(x, patch_size: int = 16, bands: tuple = (8, 12, 16)):
     lf = lf.permute(0, 2, 3, 1, 4).contiguous().view(B, total_patches, C * dim_lf)
     mf = mf.permute(0, 2, 3, 1, 4).contiguous().view(B, total_patches, C * dim_mf)
     hf = hf.permute(0, 2, 3, 1, 4).contiguous().view(B, total_patches, C * dim_hf)
+    lf = (lf - lf.mean(dim=-1, keepdim=True)) / (lf.std(dim=-1, keepdim=True) + 1e-6)
+    mf = (mf - mf.mean(dim=-1, keepdim=True)) / (mf.std(dim=-1, keepdim=True) + 1e-6)
+    hf = (hf - hf.mean(dim=-1, keepdim=True)) / (hf.std(dim=-1, keepdim=True) + 1e-6)
 
     return [lf, mf, hf]
 
