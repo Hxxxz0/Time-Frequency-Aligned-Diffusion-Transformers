@@ -290,6 +290,48 @@ tail -f exps/dct-film-ffhq-70k/log.txt
 tensorboard --logdir=exps/dct-film-ffhq-70k
 ```
 
+### FID 评估与使用
+
+我们已经在训练流程中集成了 FID 自动评估能力。使用方法如下：
+
+1) 生成真实数据集的 FID 统计文件（仅首次需要）
+
+```bash
+# 建议先激活环境
+conda activate repa
+
+# 使用模块方式生成统计文件（会自动下载 FID 版 InceptionV3 权重 ~91MB 并缓存）
+python -m tools.generate_fid_stats full_dataset/images full_dataset/fid_stats.npz
+```
+
+2) 开启训练时的 FID 自动评估（可选）
+
+- 训练脚本中加入以下参数即可：
+
+```bash
+--enable-fid-eval \
+--fid-samples=5000
+```
+
+- 我们提供的 `train_full_8gpu.sh` 已示例开启了 FID 评估。训练过程中会在每次保存 checkpoint 后，自动采样并计算 FID，日志会写入 TensorBoard，同时在实验目录下追加 `fid_log.txt`。
+
+3) InceptionV3 权重缓存与离线环境
+
+- 首次运行会自动下载权重到缓存目录：
+  `~/.cache/torch/hub/checkpoints/pt_inception-2015-12-05-6726825d.pth`
+- 无网环境可提前下载并放置到相同路径，或通过设置环境变量指定缓存目录：
+
+```bash
+export TORCH_HOME=/your/cache/dir
+mkdir -p $TORCH_HOME/hub/checkpoints
+wget -O $TORCH_HOME/hub/checkpoints/pt_inception-2015-12-05-6726825d.pth \
+  https://github.com/mseitzer/pytorch-fid/releases/download/fid_weights/pt_inception-2015-12-05-6726825d.pth
+```
+
+4) 分布式训练注意
+
+- 本项目在分布式环境下进行 FID 评估时，会由各进程分片生成样本并统一到主进程计算，避免重复与冲突。无需用户额外处理。
+
 #### 训练参数说明
 - `--model="SiT-XL/2"`: 使用最大的SiT模型获得最佳效果
 - `--enc-type="DCT"`: 使用DCT频域特征作为辅助监督

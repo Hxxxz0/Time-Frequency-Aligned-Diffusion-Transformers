@@ -83,16 +83,16 @@ class SILoss:
         if zs and len(zs) > 0:
             per_encoder_losses = []  # list of tensors with shape (B,)
             for z, z_tilde in zip(zs, zs_tilde):
-                    if self.proj_type == "cosine":
+                if self.proj_type == "cosine":
                     # negative cosine similarity (keeps consistent with original design)
                     z = F.normalize(z, dim=-1)
                     z_tilde = F.normalize(z_tilde, dim=-1)
                     loss_tok = -(z * z_tilde).sum(dim=-1)  # (B, T)
-                    elif self.proj_type == "l2":
+                elif self.proj_type == "l2":
                     # mean squared error per token (consistent with previous implementation)
                     loss_tok = (z - z_tilde).pow(2).mean(dim=-1)  # (B, T)
-                    else:
-                        raise ValueError(f"Unknown proj_type: {self.proj_type}")
+                else:
+                    raise ValueError(f"Unknown proj_type: {self.proj_type}")
 
                 per_encoder_losses.append(loss_tok.mean(dim=-1))  # (B,)
 

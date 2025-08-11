@@ -36,6 +36,11 @@ from torchvision.utils import make_grid
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from torchvision.transforms import Normalize
 
+# FID计算相关导入
+import tempfile
+import shutil
+from tools.fid_score import calculate_fid_given_paths
+
 logger = get_logger(__name__)
 
 CLIP_DEFAULT_MEAN = (0.48145466, 0.4578275, 0.40821073)
@@ -246,6 +251,103 @@ def requires_grad(model, flag=True):
     """
     for p in model.parameters():
         p.requires_grad = flag
+
+
+@torch.no_grad()
+def evaluate_fid(model, vae, accelerator, args, global_step, latents_scale=1., latents_bias=0., 
+                 n_samples=10000, sample_steps=50, cfg_scale=4.0):
+    """
+    计算FID分数
+    """
+    from samplers import euler_sampler
+    
+    logger.info(f"开始计算FID分数 (步骤={global_step}, 样本数={n_samples})")
+    
+    # 创建共享临时目录（所有进程共享一个目录，各自写入分片）
+    shared_temp_dir = os.path.join(args.output_dir, args.exp_name, f"fid_tmp_{global_step}")
+    if accelerator.is_main_process:
+        os.makedirs(shared_temp_dir, exist_ok=True)
+    accelerator.wait_for_everyone()
+    
+    try:
+        # 生成样本（按进程分片）
+        model.eval()
+        world_size = accelerator.num_processes
+        rank = accelerator.process_index
+        per_rank = (n_samples + world_size - 1) // world_size
+        start_idx = rank * per_rank
+        end_idx = min(n_samples, (rank + 1) * per_rank)
+        local_total = max(0, end_idx - start_idx)
+        batch_size = min(args.batch_size, 32)  # 控制批量大小避免显存溢出
+
+        generated = 0
+        while generated < local_total:
+            current_batch_size = min(batch_size, local_total - generated)
+
+            # 生成噪声和标签
+            xT = torch.randn(current_batch_size, 4, args.resolution // 8, args.resolution // 8,
+                             device=accelerator.device)
+            ys = torch.randint(0, args.num_classes, (current_batch_size,), device=accelerator.device)
+
+            # 采样
+            samples = euler_sampler(
+                model,
+                xT,
+                ys,
+                num_steps=sample_steps,
+                cfg_scale=cfg_scale,
+                guidance_low=0.,
+                guidance_high=1.,
+                path_type=args.path_type,
+                heun=False,
+            ).to(torch.float32)
+
+            # 解码为图像
+            samples = vae.decode((samples - latents_bias) / latents_scale).sample
+            samples = (samples + 1) / 2.  # 归一化到[0,1]
+            samples = samples.clamp(0, 1)
+
+            # 保存图像到共享目录，使用全局索引避免冲突
+            from torchvision.transforms import ToPILImage
+            to_pil = ToPILImage()
+            for i in range(current_batch_size):
+                global_idx = start_idx + generated + i
+                img_path = os.path.join(shared_temp_dir, f"sample_{global_idx:06d}.png")
+                pil_img = to_pil(samples[i])
+                pil_img.save(img_path)
+
+            generated += current_batch_size
+
+        accelerator.wait_for_everyone()
+        
+        # 计算FID（仅主进程）
+        fid_value = 0
+        if accelerator.is_main_process:
+            # 假设真实数据统计文件存在
+            real_stats_path = os.path.join(args.data_dir, "fid_stats.npz")
+            if os.path.exists(real_stats_path):
+                fid_value = calculate_fid_given_paths([real_stats_path, shared_temp_dir])
+                logger.info(f"步骤 {global_step}: FID = {fid_value:.2f}")
+            else:
+                logger.warning(f"未找到真实数据统计文件: {real_stats_path}")
+                logger.info("请先使用以下命令生成FID统计文件:")
+                logger.info(f"python -m tools.generate_fid_stats {args.data_dir}/images {real_stats_path}")
+
+            # 仅主进程清理共享目录
+            shutil.rmtree(shared_temp_dir)
+        
+        # 广播FID值到所有进程
+        fid_tensor = torch.tensor(fid_value, device=accelerator.device)
+        fid_tensor = accelerator.reduce(fid_tensor, reduction='sum')
+        
+        return fid_tensor.item()
+        
+    except Exception as e:
+        logger.error(f"FID计算失败: {e}")
+        # 确保清理临时文件
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+        return -1
 
 
 #################################################################################
@@ -492,6 +594,33 @@ def main(args):
                     checkpoint_path = f"{checkpoint_dir}/{global_step:07d}.pt"
                     torch.save(checkpoint, checkpoint_path)
                     logger.info(f"Saved checkpoint to {checkpoint_path}")
+                
+                # 计算FID分数
+                accelerator.wait_for_everyone()
+                if hasattr(args, 'enable_fid_eval') and args.enable_fid_eval:
+                    fid_score = evaluate_fid(
+                        ema,  # 使用EMA模型进行评估
+                        vae,
+                        accelerator,
+                        args,
+                        global_step,
+                        latents_scale=latents_scale,
+                        latents_bias=latents_bias,
+                        n_samples=getattr(args, 'fid_samples', 5000),
+                        sample_steps=50,
+                        cfg_scale=4.0
+                    )
+                    
+                    if accelerator.is_main_process and fid_score > 0:
+                        # 记录FID分数
+                        accelerator.log({"fid": fid_score}, step=global_step)
+                        
+                        # 保存FID历史记录
+                        fid_log_path = os.path.join(save_dir, "fid_log.txt")
+                        with open(fid_log_path, "a") as f:
+                            f.write(f"step={global_step} fid={fid_score:.3f}\n")
+                
+                accelerator.wait_for_everyone()
 
             if (global_step == 1 or (global_step % args.sampling_steps == 0 and global_step > 0)):
                 from samplers import euler_sampler
@@ -592,6 +721,10 @@ def parse_args(input_args=None):
     parser.add_argument("--proj-type", type=str, default="cosine", choices=["cosine", "l2"])
     parser.add_argument("--weighting", default="uniform", type=str, help="Max gradient norm.")
     parser.add_argument("--legacy", action=argparse.BooleanOptionalAction, default=False)
+    
+    # FID evaluation
+    parser.add_argument("--enable-fid-eval", action="store_true", help="启用FID自动计算")
+    parser.add_argument("--fid-samples", type=int, default=5000, help="FID计算使用的样本数量")
 
     if input_args is not None:
         args = parser.parse_args(input_args)
