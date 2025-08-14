@@ -42,6 +42,13 @@ import shutil
 from tools.fid_score import calculate_fid_given_paths
 
 logger = get_logger(__name__)
+# Allowlist argparse.Namespace for PyTorch >= 2.6 safe deserialization
+try:
+    from torch.serialization import add_safe_globals  # PyTorch 2.6+
+    add_safe_globals([argparse.Namespace])
+except Exception:
+    pass
+
 
 CLIP_DEFAULT_MEAN = (0.48145466, 0.4578275, 0.40821073)
 CLIP_DEFAULT_STD = (0.26862954, 0.26130258, 0.27577711)
@@ -345,8 +352,11 @@ def evaluate_fid(model, vae, accelerator, args, global_step, latents_scale=1., l
     except Exception as e:
         logger.error(f"FID计算失败: {e}")
         # 确保清理临时文件
-        if os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
+        try:
+            if accelerator.is_main_process and os.path.exists(shared_temp_dir):
+                shutil.rmtree(shared_temp_dir)
+        except Exception:
+            pass
         return -1
 
 
@@ -478,12 +488,25 @@ def main(args):
     
     # resume:
     global_step = 0
-    if args.resume_step > 0:
-        ckpt_name = str(args.resume_step).zfill(7) +'.pt'
-        ckpt = torch.load(
-            f'{os.path.join(args.output_dir, args.exp_name)}/checkpoints/{ckpt_name}',
-            map_location='cpu',
-            )
+    ckpt = None
+    # Prefer absolute path resume if provided
+    if getattr(args, "resume_from", None):
+        ckpt_path = args.resume_from
+        if not os.path.isfile(ckpt_path):
+            raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+        try:
+            ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+        except TypeError:
+            ckpt = torch.load(ckpt_path, map_location='cpu')
+    elif args.resume_step > 0:
+        ckpt_name = str(args.resume_step).zfill(7) + '.pt'
+        ckpt_path = f"{os.path.join(args.output_dir, args.exp_name)}/checkpoints/{ckpt_name}"
+        try:
+            ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+        except TypeError:
+            ckpt = torch.load(ckpt_path, map_location='cpu')
+
+    if ckpt is not None:
         model.load_state_dict(ckpt['model'])
         ema.load_state_dict(ckpt['ema'])
         optimizer.load_state_dict(ckpt['opt'])
@@ -677,6 +700,7 @@ def parse_args(input_args=None):
     parser.add_argument("--report-to", type=str, default="wandb")
     parser.add_argument("--sampling-steps", type=int, default=10000)
     parser.add_argument("--resume-step", type=int, default=0)
+    parser.add_argument("--resume-from", type=str, default=None, help="Absolute path to checkpoint .pt to resume from")
 
     # model
     parser.add_argument("--model", type=str)
