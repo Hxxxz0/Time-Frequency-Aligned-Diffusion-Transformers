@@ -24,8 +24,13 @@ def build_mlp(hidden_size, projector_dim, z_dim):
                 nn.Linear(projector_dim, z_dim),
             )
 
+# def modulate(x, shift, scale):
+#     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+
 def modulate(x, shift, scale):
-    return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+    #return x
+    #return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+    return x + 0.0 * (shift.mean() + scale.mean())
 
 #################################################################################
 #               Embedding Layers for Timesteps and Class Labels                 #

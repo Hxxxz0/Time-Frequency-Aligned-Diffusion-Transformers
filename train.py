@@ -331,7 +331,7 @@ def evaluate_fid(model, vae, accelerator, args, global_step, latents_scale=1., l
         fid_value = 0
         if accelerator.is_main_process:
             # 假设真实数据统计文件存在
-            real_stats_path = os.path.join(args.data_dir, "fid_stats.npz")
+            real_stats_path = os.path.join(args.data_dir, "fid_stats_50k.npz")
             if os.path.exists(real_stats_path):
                 fid_value = calculate_fid_given_paths([real_stats_path, shared_temp_dir])
                 logger.info(f"步骤 {global_step}: FID = {fid_value:.2f}")

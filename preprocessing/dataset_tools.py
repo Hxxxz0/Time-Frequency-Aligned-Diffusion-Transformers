@@ -237,8 +237,9 @@ def open_dest(dest: str) -> Tuple[str, Callable[[str, Union[bytes, str]], None],
         # necessary as folder_write_bytes() also mkdirs, but it's better
         # to give an error message earlier in case the dest folder
         # somehow cannot be created.
-        if os.path.isdir(dest) and len(os.listdir(dest)) != 0:
-            raise click.ClickException('--dest folder must be empty')
+        # Allow resuming encoding by commenting out the empty folder check
+        # if os.path.isdir(dest) and len(os.listdir(dest)) != 0:
+        #     raise click.ClickException('--dest folder must be empty')
         os.makedirs(dest, exist_ok=True)
 
         def folder_write_bytes(fname: str, data: Union[bytes, str]):
@@ -398,14 +399,21 @@ def encode(
     labels = []
 
     for idx, image in tqdm(enumerate(input_iter), total=num_files):
-        img_tensor = torch.tensor(image.img).to('cuda').permute(2, 0, 1).unsqueeze(0)
-        mean_std = vae.encode_pixels(img_tensor)[0].cpu()
         idx_str = f'{idx:08d}'
         archive_fname = f'{idx_str[:5]}/img-mean-std-{idx_str}.npy'
+        output_path = os.path.join(archive_root_dir, archive_fname)
+        
+        # Skip if file already exists
+        if os.path.exists(output_path):
+            labels.append([archive_fname, image.label] if image.label is not None else None)
+            continue
+            
+        img_tensor = torch.tensor(image.img).to('cuda').permute(2, 0, 1).unsqueeze(0)
+        mean_std = vae.encode_pixels(img_tensor)[0].cpu()
 
         f = io.BytesIO()
         np.save(f, mean_std)
-        save_bytes(os.path.join(archive_root_dir, archive_fname), f.getvalue())
+        save_bytes(output_path, f.getvalue())
         labels.append([archive_fname, image.label] if image.label is not None else None)
 
     metadata = {'labels': labels if all(x is not None for x in labels) else None}
