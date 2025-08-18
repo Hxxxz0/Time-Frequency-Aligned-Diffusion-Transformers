@@ -1,0 +1,52 @@
+# 数据集目录
+images256x256/
+full_dataset/
+preprocessed_data/
+data/
+cifar10_processed/
+preprocessing/cifar10_raw/
+
+# 实验结果和日志
+exps/
+logs/
+runs/
+*.log
+nohup.out
+
+# Python缓存文件
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+.pytest_cache/
+
+# 模型检查点和权重
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+ckpts/
+
+# 临时文件
+*.tmp
+*.temp
+*~
+
+# IDE和编辑器文件
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 环境变量文件
+.env
+.env.local
+
+# 其他临时文件
+DCT_REPA_README.md
